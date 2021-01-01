@@ -169,7 +169,8 @@ CREATE TABLE possiede
 CREATE TABLE assegnamento
 	(
 		codice_v INT UNSIGNED REFERENCES veicolo(codice_v),
-		codice_sp INT UNSIGNED REFERENCES spedizione(codice_spedizione)
+		codice_sp INT UNSIGNED REFERENCES spedizione(codice_spedizione),
+		PRIMARY KEY (codice_sp)
 	);
 
 
@@ -242,10 +243,50 @@ END //
 DELIMITER ;
 
 
+DELIMITER //
+CREATE TRIGGER assegnamento_veicolo
+	BEFORE INSERT ON assegnamento FOR EACH ROW
+	BEGIN
+	DECLARE num INT;
+	SELECT count(*) FROM assegnamento WHERE codice_sp = new.codice_sp INTO num;
+	IF (num >= 1) THEN
+		SIGNAL SQLSTATE "45000";
+	END IF;
+END //
+DELIMITER ;
 
 
 
 
+
+-- views
+
+CREATE VIEW costo_spedizione (codice_spedizione, costo) AS 
+SELECT codice_sp, prezzo_base*peso
+FROM pacco JOIN categoria on nome = nome_categoria;
+
+
+CREATE VIEW posizione_pacco (codice_spedizione, latitudine, longitudine) AS
+SELECT pacco.codice_sp, latitudine, longitudine
+FROM pacco JOIN assegnamento on assegnamento.codice_sp = pacco.codice_sp
+	 JOIN veicolo ON veicolo.codice_v = assegnamento.codice_v
+WHERE pacco.codice_sp = assegnamento.codice_sp;
+
+
+-- FROM pacco JOIN fase ON pacco.codice_sp = fase.codice_sp 
+--	 JOIN assegnamento ON assegnamento.codice_sp = pacco.codice_sp
+--	 JOIN veicolo ON veicolo.codice_v = assegnamento.codice_v
+-- WHERE fase.nome = "in transito" and fase.data_ora = (SELECT max(data_ora)
+--													FROM fase as fase2
+--													WHERE fase.codice_sp = fase2.codice_sp);
+
+
+-- DELIMITER //
+-- CREATE PROCEDURE elimina_spedizione (IN @codice_sp INT)
+--	BEGIN
+--	DELETE FROM spedizione WHERE codice_spedizione = codice_sp
+--	END //
+-- DELIMITER ;
 
 
 
@@ -266,7 +307,16 @@ insert into destinatario
 values (45, 37, "ciao", "ciao", "italia");
 
 insert into spedizione 
-values (13, "nazionale", "abcguri294ktuehv", 45, 37);
+values (1, "nazionale", "abcguri294ktuehv", 45, 37);
+
+insert into veicolo
+values (1, "aa11bb", 1000, "autoarticolato", 34, 41);
+
+insert into veicolo
+values (2, "cc33qq", 1000, "autoarticolato", 89, 23);
+
+insert into pacco
+values (1, 23, 10, 10, 5, NULL);
 
 
 
