@@ -42,7 +42,8 @@ CREATE TABLE recapiti
 		email VARCHAR(60) NOT NULL UNIQUE,
 		cf_cliente CHAR(16) NOT NULL,
 		FOREIGN KEY (cf_cliente) REFERENCES cliente(cf),
-		check (email regexp'^[a-zA-Z0-9][a-zA-Z0-9._-]*[a-zA-Z0-9._-]@[a-zA-Z0-9][a-zA-Z0-9._-]*[a-zA-Z0-9]\\.[a-zA-Z]{2,63}$')
+		check (email regexp'^[a-zA-Z0-9][a-zA-Z0-9._-]*[a-zA-Z0-9._-]@[a-zA-Z0-9]
+			  [a-zA-Z0-9._-]*[a-zA-Z0-9]\\.[a-zA-Z]{2,63}$')
 	);
 
 
@@ -141,7 +142,9 @@ CREATE TABLE centro_operativo
 		longitudine FLOAT NOT NULL,
 		nome_responsabile VARCHAR(45) NOT NULL,
 		email_segreteria VARCHAR(60) NOT NULL UNIQUE,
-		tipo_co VARCHAR(45) NOT NULL
+		tipo_co VARCHAR(45) NOT NULL,
+		check (email_segreteria regexp '^[a-zA-Z0-9][a-zA-Z0-9._-]*[a-zA-Z0-9._-]@[a-zA-Z0-9][a-zA-Z0-9._-]*[a-zA-Z0-9]\\.[a-zA-Z]{2,63}$')
+
 	);
 
 
@@ -150,7 +153,7 @@ CREATE TABLE pagamento
 	(
 		codice_co INT UNSIGNED,
 		numero_carta BIGINT UNSIGNED,
-		costo_effetivo FLOAT UNSIGNED NOT NULL,
+		costo_effettivo FLOAT UNSIGNED NOT NULL,
 		PRIMARY KEY (codice_co, numero_carta),
 		FOREIGN KEY (codice_co) REFERENCES centro_operativo(codice_co),
 		FOREIGN KEY (numero_carta) REFERENCES carta_di_credito(numero)
@@ -182,7 +185,8 @@ CREATE TABLE veicolo
 		valore_volumetrico FLOAT NOT NULL,
 		tipo_veicolo VARCHAR(45) NOT NULL,
 		latitudine FLOAT NOT NULL,
-		longitudine FLOAT NOT NULL
+		longitudine FLOAT NOT NULL,
+		check (targa regexp '^[A-Za-z]{2}[0-9]{3}[A-Za-z]{2}$')
 	);
 
 
@@ -257,13 +261,54 @@ DELIMITER ;
 
 
 
+DELIMITER //
+CREATE TRIGGER scadenza_carta_di_credito
+	BEFORE INSERT ON carta_di_credito FOR EACH ROW
+	BEGIN
+	IF ( CURRENT_TIMESTAMP > new.data_di_scadenza) THEN
+		SIGNAL SQLSTATE "45000";
+	END IF;
+END //
+DELIMITER ;
+
+
+
+DELIMITER //
+CREATE TRIGGER inserimento_indirizzo_fatturazione
+	BEFORE INSERT ON cliente FOR EACH ROW
+	BEGIN
+	IF (new.via_fatturazione IS NULL and new.città_fatturazione IS NULL and new.cap_fatturazione IS NULL
+		and new.provincia_fatturazione IS NULL) THEN
+		SET new.via_fatturazione = new.via_residenza;
+		SET new.città_fatturazione = new.città_residenza;
+		SET new.cap_fatturazione = new.cap_residenza;
+		SET new.provincia_fatturazione = new.provincia_residenza;
+	END IF;
+END //
+DELIMITER ;
+
+
+
+
+-- DELIMITER
+-- CREATE TRIGGER affidamento_centro_operativo
+--	AFTER INSERT ON pacco FOR EACH ROW
+--	BEGIN
+	
+
 
 
 -- views
 
-CREATE VIEW costo_spedizione (codice_spedizione, costo) AS 
-SELECT codice_sp, prezzo_base*peso
-FROM pacco JOIN categoria on nome = nome_categoria;
+CREATE VIEW costo_spedizione (codice_spedizione, stima_costo, costo_effettivo) AS 
+SELECT pacco.codice_sp, max(prezzo_base*peso), max(costo_effettivo)
+FROM pacco JOIN categoria ON nome = nome_categoria
+	JOIN spedizione ON pacco.codice_sp = spedizione.codice_spedizione
+	LEFT JOIN affidata_a ON spedizione.codice_spedizione = affidata_a.codice_sp
+	LEFT JOIN centro_operativo ON affidata_a.codice_co = centro_operativo.codice_co
+	LEFT JOIN pagamento ON centro_operativo.codice_co = pagamento.codice_co
+-- WHERE pagamento.codice_co IS NOT NULL
+group by pacco.codice_sp;
 
 
 CREATE VIEW posizione_pacco (codice_spedizione, latitudine, longitudine) AS
@@ -271,6 +316,7 @@ SELECT pacco.codice_sp, latitudine, longitudine
 FROM pacco JOIN assegnamento on assegnamento.codice_sp = pacco.codice_sp
 	 JOIN veicolo ON veicolo.codice_v = assegnamento.codice_v
 WHERE pacco.codice_sp = assegnamento.codice_sp;
+
 
 
 -- FROM pacco JOIN fase ON pacco.codice_sp = fase.codice_sp 
@@ -281,13 +327,44 @@ WHERE pacco.codice_sp = assegnamento.codice_sp;
 --													WHERE fase.codice_sp = fase2.codice_sp);
 
 
+
+-- procedures
+
 -- DELIMITER //
--- CREATE PROCEDURE elimina_spedizione (IN @codice_sp INT)
+-- CREATE PROCEDURE elimina_spedizione (IN codice_sp INT)
 --	BEGIN
 --	DELETE FROM spedizione WHERE codice_spedizione = codice_sp
 --	END //
 -- DELIMITER ;
 
+
+DELIMITER //
+CREATE PROCEDURE traccia_pacco (IN codice INT)
+BEGIN
+	SELECT codice_sp, nome, data_ora
+	FROM fase
+	WHERE codice = codice_sp;
+END //
+DELIMITER ;
+
+
+
+-- events
+
+
+SET GLOBAL EVENT_SCHEDULER = ON;
+
+CREATE EVENT report
+ON SCHEDULE EVERY 1 DAY 
+ON COMPLETION PRESERVE
+DO 
+	SELECT count(*) AS spedizioni_accettate
+	FROM fase
+	WHERE nome = "confermata" AND data_ora < (NOW() < interval 1 day)
+	UNION 
+	SELECT count(*) AS spedizioni_consegnate, sum(costo_effettivo)
+	FROM fase JOIN costo_spedizione ON codice_sp = codice_spedizione
+	WHERE nome = "consegnato" AND data_ora < (NOW() < interval 1 day);
 
 
 
@@ -303,6 +380,9 @@ values ("piccola", 10, 0, 100);
 insert into cliente
 values ("abcguri294ktuehv", "federico", "prova", "1999-02-26", "via ciao", "roma", 00012, "roma", "via ciao", "roma", 00012, "roma");
 
+insert into carta_di_credito
+values (5333123187465423, "federico", "prova", "2022-12-12", 432, "abcguri294ktuehv");
+
 insert into destinatario
 values (45, 37, "ciao", "ciao", "italia");
 
@@ -310,13 +390,23 @@ insert into spedizione
 values (1, "nazionale", "abcguri294ktuehv", 45, 37);
 
 insert into veicolo
-values (1, "aa11bb", 1000, "autoarticolato", 34, 41);
+values (1, "aa111bb", 1000, "autoarticolato", 34, 41);
 
 insert into veicolo
-values (2, "cc33qq", 1000, "autoarticolato", 89, 23);
+values (2, "cc333qq", 1000, "autoarticolato", 89, 23);
 
-insert into pacco
-values (1, 23, 10, 10, 5, NULL);
+INSERT INTO centro_operativo
+VALUES (1, "via di panico 7", "roma", 00186, "roma", 069812846, 41.899992, 12.467946, "russo", "centroroma@gmail.com", "centro prossimità"),
+(2, "via paolo orsi 15", "roma", 00178, "roma", 067323182, 41.821876, 12.584744, "verdi", "centroroma2@gmail.com", "centro prossimità"),
+(3, "via camilla ravera 5", "roma", 00135, "roma", 068473192, 41.958950, 12.395798, "rossi", "centroroma3@gmail.com", "centro prossimità"),
+(4, "via edimburgo 83", "roma", 00144, "roma", 06783256, 41.819247, 12.453754, "bianchi", "centroroma4@gmail.com", "centro smistamento nazionale"),
+(5, "via dei serragli 32", "firenze", 50125, "firenze", 05432654, 43.767032, 11.245384, "ricci", "centrofirenze@gmail.com", "centro prossimità"),
+(6, "via amati 7", "pistoia", 51100, "pistoia", 05636734,43.931099, 10.918457, "gatti", "centropistoia@gmail.com", "centro prossimità"),
+(7, "via del pino 15", "firenze", 50137, "firenze", 05358796, 43.779575, 11.295022, "testa", "centrofirenze2@gmail.com", "centro smistamento nazionale");
+
+
+-- insert into pacco
+-- values (1, 23, 10, 10, 5, NULL);
 
 
 
