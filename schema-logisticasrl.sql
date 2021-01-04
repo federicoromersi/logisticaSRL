@@ -52,6 +52,7 @@ CREATE TABLE coordinate_geo_rec_pacchi
 	(
 		latitudine FLOAT,
 		longitudine FLOAT,
+		-- flag BOOLEAN,
 		PRIMARY KEY (latitudine, longitudine)
 	);
 
@@ -62,6 +63,7 @@ CREATE TABLE coordinate_cliente
 		cf_cliente CHAR(16) PRIMARY KEY REFERENCES cliente(cf),
 		latitudine_cgr FLOAT NOT NULL,
 		longitudine_cgr FLOAT NOT NULL,
+		flag BOOLEAN,
 		FOREIGN KEY (latitudine_cgr, longitudine_cgr) REFERENCES coordinate_geo_rec_pacchi(latitudine, longitudine)
 	);
 
@@ -125,6 +127,7 @@ CREATE TABLE affidata_a
 	(
 		codice_sp INT UNSIGNED REFERENCES spedizione(codice_spedizione),
 		codice_co INT UNSIGNED REFERENCES centro_operativo(codice_co),
+		ordine_spedizione INT UNSIGNED,
 		PRIMARY KEY (codice_sp, codice_co)
 	);
 
@@ -290,10 +293,150 @@ DELIMITER ;
 
 
 
--- DELIMITER
--- CREATE TRIGGER affidamento_centro_operativo
---	AFTER INSERT ON pacco FOR EACH ROW
---	BEGIN
+
+DELIMITER //
+CREATE TRIGGER affidamento_centro_operativo
+AFTER INSERT ON spedizione FOR EACH ROW
+	BEGIN
+	-- DECLARE done INT DEFAULT FALSE;
+	DECLARE dist FLOAT;
+	-- DECLARE cursore1 CURSOR FOR SELECT codice_co FROM centro_operativo;
+	-- DECLARE cursore2 CURSOR FOR SELECT latitudine FROM centro_operativo;
+	-- DECLARE cursore3 CURSOR FOR SELECT longitudine FROM centro_operativo;
+	-- DECLARE CONTINUE HANDLER FOR NOT FOUND SET done = TRUE;
+	-- open cursore1;
+	-- open cursore2;
+	-- open cursore3;
+	DECLARE co1 INT;
+	DECLARE co2 INT;
+	DECLARE co3 INT;
+	DECLARE nazione_des VARCHAR(45);
+	-- calcolo centro prossimità più vicino all'indirizzo di recupero
+	SELECT codice_co
+	FROM spedizione JOIN coordinata_ritiro_pacco_cliente on cf_cliente = cf_cl,
+		 centro_operativo
+	WHERE codice_spedizione = new.codice_spedizione AND
+		  tipo_co = "centro prossimità" AND
+		  distanza(latitudine, longitudine, 
+		  latitudine_cl, longitudine_cl) = (SELECT min(distanza(latitudine, longitudine, 
+		  											latitudine_cl, longitudine_cl))
+					  						FROM spedizione JOIN coordinata_ritiro_pacco_cliente on cf_cliente = cf_cl,
+					  	   						  centro_operativo
+		  									WHERE codice_spedizione = new.codice_spedizione
+		  										  AND tipo_co = "centro prossimità") INTO co1;
+
+
+	-- inserimento centro di prossimità addetto al ritiro del pacco
+	INSERT INTO affidata_a VALUES (new.codice_spedizione, co1, 1);
+	
+	-- calcolo distanza cliente-destinazione
+	SELECT distanza(latitudine_des, longitudine_des, latitudine_cl, longitudine_cl)
+	FROM spedizione JOIN coordinata_ritiro_pacco_cliente ON cf_cliente = cf_cl
+	WHERE codice_spedizione = new.codice_spedizione INTO dist;
+
+	-- se la distanza è minore di 40 sarà lo stesso centro di prossimità che ha ritirato
+	-- il pacco ad occuparsi della consegna
+	IF ( dist > 40) THEN
+		-- cerco il centro di smistamento nazionale più vicino al centro di prossimità
+		-- che ha ritirato il pacco
+		SELECT c2.codice_co
+		FROM centro_operativo AS c1, centro_operativo AS c2 
+		WHERE c1.codice_co = co1 AND c2.codice_co != co1 AND c2.tipo_co = "centro smistamento nazionale" 
+			AND distanza(c1.latitudine, c1.longitudine,
+			c2.latitudine, c2.longitudine) = (SELECT min(distanza(c1.latitudine, c1.longitudine,
+													c2.latitudine, c2.longitudine))
+											  FROM centro_operativo AS c1, centro_operativo AS c2 
+											  WHERE c1.codice_co = co1 AND c2.codice_co != co1
+											 	 AND c2.tipo_co = "centro smistamento nazionale") INTO co2;
+
+		INSERT INTO affidata_a VALUES (new.codice_spedizione, co2, 2);
+
+
+		-- verifico se la spedizione è del tipo internazionale
+		IF ( SELECT tipo_spedizione FROM spedizione ON codice_spedizione = new.codice_spedizione = internazionale) THEN 
+			-- cerco il centro di smistamento internazionale più vicino al centro di smistamento 
+			-- nazionale precedentemente scelto
+			SELECT c2.codice_co
+			FROM centro_operativo AS c1, centro_operativo AS c2 
+			WHERE c1.codice_co = co2 AND c2.codice_co != co2 AND c2.tipo_co = "centro smistamento internazionale"
+				AND distanza(c1.latitudine, c1.longitudine,
+				c2.latitudine, c2.longitudine) = (SELECT min(distanza(c1.latitudine, c1.longitudine,
+													c2.latitudine, c2.longitudine))
+											  	FROM centro_operativo AS c1, centro_operativo AS c2 
+											  	WHERE c1.codice_co = co2 AND c2.codice_co != co2
+											  		AND c2.tipo_co = "centro smistamento internazionale") INTO co3;
+
+		INSERT INTO affidata_a VALUES (new.codice_spedizione, co3, 3);
+
+
+		END IF;
+
+
+	END IF;
+
+	END//
+
+DELIMITER ;
+
+
+/* OPPURE 
+	SELECT codice_co
+	FROM spedizione JOIN cliente ON cf_cliente = cf 
+		 JOIN coordinate_cliente as cc ON cc.cf_cliente = cf,
+		 centro_operativo
+	WHERE flag = TRUE AND
+		  distanza(latitudine, longitudine, 
+		  latitudine_cgr, longitudine_cgr) = (SELECT min(distanza(latitudine, longitudine, 
+		  											latitudine_cgr, longitudine_cgr))
+					  						 FROM spedizione JOIN cliente ON cf_cliente = cf 
+					  	  					 JOIN coordinate_cliente as cc ON cc.cf_cliente = cf,
+					  	   						  centro_operativo);
+*/			
+
+
+
+DELIMITER //
+
+CREATE TRIGGER verifica_tipo_spedizione
+BEFORE INSERT ON spedizione FOR EACH ROW
+BEGIN
+	DECLARE tipo VARCHAR(45);
+	SELECT nazione
+	FROM spedizione, destinatario
+	WHERE codice_spedizione = new.codice_spedizione AND latitudine = latitudine_des AND longitudine = longitudine_des INTO tipo;
+
+	SET new.tipo_spedizione = tipo;
+END //
+
+DELIMITER ;
+
+
+
+
+
+/*funzione che passati in input latitudine e longitudine di 2 posti
+restituisce la distanza tra i 2 punti*/
+
+DELIMITER //
+
+CREATE FUNCTION distanza(lat1 FLOAT, long1 FLOAT, lat2 FLOAT, long2 FLOAT)
+returns FLOAT
+DETERMINISTIC
+BEGIN
+	DECLARE r INT;
+	DECLARE dist FLOAT;
+	SET lat1 = RADIANS(lat1);
+	SET long1 = RADIANS(long1);
+	SET lat2 = RADIANS(lat2);
+	SET long2 = RADIANS(long2);
+	SET r = 6371;
+	SET dist = 2*r* asin( sqrt( POWER(sin((lat2-lat1)/2),2) + cos(lat1) *cos(lat2) *POWER(sin((long2-long1)/2),2) ) );
+	return dist;
+END //
+
+DELIMITER ;
+
+
 	
 
 
@@ -318,6 +461,16 @@ FROM pacco JOIN assegnamento on assegnamento.codice_sp = pacco.codice_sp
 WHERE pacco.codice_sp = assegnamento.codice_sp;
 
 
+CREATE VIEW spedizioni_accettate_24H (sp_accettate) AS
+SELECT count(*)
+FROM fase
+where nome = "confermata" AND data_ora > (NOW() - interval 1 day);
+
+
+CREATE VIEW spedizioni_consegnate_24H (sp_consegnate, entrate_totali) AS
+SELECT count(*), sum(costo_effettivo)
+FROM fase JOIN costo_spedizione on codice_sp = codice_spedizione
+where nome = "consegnato" AND data_ora > (NOW() - interval 1 day);
 
 -- FROM pacco JOIN fase ON pacco.codice_sp = fase.codice_sp 
 --	 JOIN assegnamento ON assegnamento.codice_sp = pacco.codice_sp
@@ -326,6 +479,11 @@ WHERE pacco.codice_sp = assegnamento.codice_sp;
 --													FROM fase as fase2
 --													WHERE fase.codice_sp = fase2.codice_sp);
 
+
+CREATE VIEW coordinata_ritiro_pacco_cliente (cf_cl, latitudine_cl, longitudine_cl) AS
+SELECT cf, latitudine_cgr, longitudine_cgr
+FROM cliente JOIN coordinate_cliente as cc ON cc.cf_cliente = cf
+WHERE flag = TRUE;
 
 
 -- procedures
@@ -355,16 +513,11 @@ DELIMITER ;
 SET GLOBAL EVENT_SCHEDULER = ON;
 
 CREATE EVENT report
-ON SCHEDULE EVERY 1 DAY 
+ON SCHEDULE EVERY 1 day
 ON COMPLETION PRESERVE
 DO 
-	SELECT count(*) AS spedizioni_accettate
-	FROM fase
-	WHERE nome = "confermata" AND data_ora < (NOW() < interval 1 day)
-	UNION 
-	SELECT count(*) AS spedizioni_consegnate, sum(costo_effettivo)
-	FROM fase JOIN costo_spedizione ON codice_sp = codice_spedizione
-	WHERE nome = "consegnato" AND data_ora < (NOW() < interval 1 day);
+	SELECT sp_accettate, sp_consegnate, entrate_totali
+	FROM spedizioni_accettate_24H, spedizioni_consegnate_24H;
 
 
 
@@ -383,11 +536,14 @@ values ("abcguri294ktuehv", "federico", "prova", "1999-02-26", "via ciao", "roma
 insert into carta_di_credito
 values (5333123187465423, "federico", "prova", "2022-12-12", 432, "abcguri294ktuehv");
 
-insert into destinatario
-values (45, 37, "ciao", "ciao", "italia");
+insert into coordinate_geo_rec_pacchi
+values (43,13);
 
-insert into spedizione 
-values (1, "nazionale", "abcguri294ktuehv", 45, 37);
+insert into coordinate_cliente
+values ("abcguri294ktuehv", 43, 13, TRUE);
+
+insert into destinatario
+values (45, 15, "ciao", "ciao", "italia");
 
 insert into veicolo
 values (1, "aa111bb", 1000, "autoarticolato", 34, 41);
@@ -404,6 +560,8 @@ VALUES (1, "via di panico 7", "roma", 00186, "roma", 069812846, 41.899992, 12.46
 (6, "via amati 7", "pistoia", 51100, "pistoia", 05636734,43.931099, 10.918457, "gatti", "centropistoia@gmail.com", "centro prossimità"),
 (7, "via del pino 15", "firenze", 50137, "firenze", 05358796, 43.779575, 11.295022, "testa", "centrofirenze2@gmail.com", "centro smistamento nazionale");
 
+insert into spedizione 
+values (1, "nazionale", "abcguri294ktuehv", 45, 15);
 
 -- insert into pacco
 -- values (1, 23, 10, 10, 5, NULL);
