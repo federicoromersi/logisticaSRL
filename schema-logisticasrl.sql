@@ -84,7 +84,7 @@ CREATE TABLE destinatario
 CREATE TABLE spedizione
 	(
 		codice_spedizione INT UNSIGNED PRIMARY KEY AUTO_INCREMENT,
-		tipo_spedizione VARCHAR(45) NOT NULL,
+		tipo_spedizione VARCHAR(45) DEFAULT NULL,
 		cf_cliente CHAR(16) NOT NULL REFERENCES cliente(cf),
 		latitudine_des FLOAT NOT NULL,
 		longitudine_des FLOAT NOT NULL,
@@ -193,6 +193,39 @@ CREATE TABLE veicolo
 	);
 
 
+CREATE TABLE giacenza_pacchi_co
+	(
+		codice_co INT UNSIGNED REFERENCES centro_operativo(codice_co),
+		codice_sp INT UNSIGNED REFERENCES spedizione(codice_spedizione),
+		PRIMARY KEY (codice_co, codice_sp)
+	);
+
+
+
+-- functions
+
+DELIMITER //
+
+CREATE FUNCTION distanza(lat1 FLOAT, long1 FLOAT, lat2 FLOAT, long2 FLOAT)
+returns FLOAT
+DETERMINISTIC
+BEGIN
+	DECLARE r INT;
+	DECLARE dist FLOAT;
+	SET lat1 = RADIANS(lat1);
+	SET long1 = RADIANS(long1);
+	SET lat2 = RADIANS(lat2);
+	SET long2 = RADIANS(long2);
+	SET r = 6371;
+	SET dist = 2*r* asin( sqrt( POWER(sin((lat2-lat1)/2),2) + cos(lat1) *cos(lat2) *POWER(sin((long2-long1)/2),2) ) );
+	return dist;
+END //
+
+DELIMITER ;
+
+
+
+
 
 
 
@@ -298,19 +331,15 @@ DELIMITER //
 CREATE TRIGGER affidamento_centro_operativo
 AFTER INSERT ON spedizione FOR EACH ROW
 	BEGIN
-	-- DECLARE done INT DEFAULT FALSE;
 	DECLARE dist FLOAT;
-	-- DECLARE cursore1 CURSOR FOR SELECT codice_co FROM centro_operativo;
-	-- DECLARE cursore2 CURSOR FOR SELECT latitudine FROM centro_operativo;
-	-- DECLARE cursore3 CURSOR FOR SELECT longitudine FROM centro_operativo;
-	-- DECLARE CONTINUE HANDLER FOR NOT FOUND SET done = TRUE;
-	-- open cursore1;
-	-- open cursore2;
-	-- open cursore3;
+	DECLARE ind INT;
 	DECLARE co1 INT;
 	DECLARE co2 INT;
 	DECLARE co3 INT;
-	DECLARE nazione_des VARCHAR(45);
+	DECLARE co4 INT;
+	DECLARE co5 INT;
+	DECLARE co6 INT;
+	SET ind = 1;
 	-- calcolo centro prossimità più vicino all'indirizzo di recupero
 	SELECT codice_co
 	FROM spedizione JOIN coordinata_ritiro_pacco_cliente on cf_cliente = cf_cl,
@@ -327,7 +356,11 @@ AFTER INSERT ON spedizione FOR EACH ROW
 
 
 	-- inserimento centro di prossimità addetto al ritiro del pacco
-	INSERT INTO affidata_a VALUES (new.codice_spedizione, co1, 1);
+	INSERT INTO affidata_a VALUES (new.codice_spedizione, co1, ind);
+	SET ind = ind + 1;
+	-- inserisce il pacco all'interno di giacenza_pacchi_co per "avvertire" il centro di prossimità
+	-- che dovrà occuparsi del ritiro del pacco
+	INSERT INTO giacenza_pacchi_co VALUES (co1, new.codice_spedizione);
 	
 	-- calcolo distanza cliente-destinazione
 	SELECT distanza(latitudine_des, longitudine_des, latitudine_cl, longitudine_cl)
@@ -349,11 +382,12 @@ AFTER INSERT ON spedizione FOR EACH ROW
 											  WHERE c1.codice_co = co1 AND c2.codice_co != co1
 											 	 AND c2.tipo_co = "centro smistamento nazionale") INTO co2;
 
-		INSERT INTO affidata_a VALUES (new.codice_spedizione, co2, 2);
+		INSERT INTO affidata_a VALUES (new.codice_spedizione, co2, ind);
+		SET ind = ind + 1 ;
 
 
 		-- verifico se la spedizione è del tipo internazionale
-		IF ( SELECT tipo_spedizione FROM spedizione ON codice_spedizione = new.codice_spedizione = internazionale) THEN 
+		IF ( (SELECT tipo_spedizione FROM spedizione WHERE codice_spedizione = new.codice_spedizione) = "internazionale") THEN 
 			-- cerco il centro di smistamento internazionale più vicino al centro di smistamento 
 			-- nazionale precedentemente scelto
 			SELECT c2.codice_co
@@ -366,15 +400,62 @@ AFTER INSERT ON spedizione FOR EACH ROW
 											  	WHERE c1.codice_co = co2 AND c2.codice_co != co2
 											  		AND c2.tipo_co = "centro smistamento internazionale") INTO co3;
 
-		INSERT INTO affidata_a VALUES (new.codice_spedizione, co3, 3);
+			INSERT INTO affidata_a VALUES (new.codice_spedizione, co3, ind);
+			SET ind = ind + 1;
 
 
+
+			-- cerco il centro di smistamento nazionale più vicino al destinatario
+			SELECT codice_co
+			FROM spedizione, centro_operativo
+			WHERE spedizione.codice_spedizione = new.codice_spedizione AND
+				codice_co != co3 AND
+				tipo_co = "centro smistamento internazionale" AND
+				distanza(latitudine, longitudine, latitudine_des, longitudine_des) = (SELECT min(distanza(latitudine, longitudine, latitudine_des, longitudine_des))
+																					  FROM spedizione, centro_operativo
+																					  WHERE spedizione.codice_spedizione = new.codice_spedizione AND
+																					  		codice_co != co3 AND
+																					  		tipo_co = "centro smistamento internazionale") INTO co4;
+
+
+			INSERT INTO affidata_a VALUES (new.codice_spedizione, co4, ind);
+			SET ind = ind + 1;
+																					
 		END IF;
 
+		-- cerco il centro di smistamento nazionale più vicino al destinatario
+		SELECT codice_co
+		FROM spedizione, centro_operativo
+		WHERE spedizione.codice_spedizione = new.codice_spedizione AND
+			codice_co != co2 AND
+			tipo_co = "centro smistamento nazionale" AND
+			distanza (latitudine, longitudine, latitudine_des, longitudine_des) = (SELECT min(distanza (latitudine, longitudine, latitudine_des, longitudine_des))
+																				   FROM spedizione, centro_operativo
+																				   WHERE spedizione.codice_spedizione = new.codice_spedizione AND
+																				   		codice_co != co2 AND
+																					  	tipo_co = "centro smistamento nazionale") INTO co5;
+
+		INSERT INTO affidata_a VALUES (new.codice_spedizione, co5, ind);
+		SET ind = ind + 1;
+
+
+	 	-- cerco il centro di prossimità più vicino al destinatario
+	 	SELECT codice_co
+		FROM spedizione, centro_operativo
+		WHERE spedizione.codice_spedizione = new.codice_spedizione AND
+			codice_co != co1 AND
+			tipo_co = "centro prossimità" AND
+			distanza (latitudine, longitudine, latitudine_des, longitudine_des) = (SELECT min(distanza (latitudine, longitudine, latitudine_des, longitudine_des))
+																				   FROM spedizione, centro_operativo
+																				   WHERE spedizione.codice_spedizione = new.codice_spedizione AND
+																				   		codice_co != co1 AND
+																					  	tipo_co = "centro prossimità") INTO co6;
+
+		INSERT INTO affidata_a VALUES (new.codice_spedizione, co6, ind);
 
 	END IF;
 
-	END//
+END//
 
 DELIMITER ;
 
@@ -400,15 +481,59 @@ DELIMITER //
 CREATE TRIGGER verifica_tipo_spedizione
 BEFORE INSERT ON spedizione FOR EACH ROW
 BEGIN
-	DECLARE tipo VARCHAR(45);
+	DECLARE nazione_des VARCHAR(45);
 	SELECT nazione
-	FROM spedizione, destinatario
-	WHERE codice_spedizione = new.codice_spedizione AND latitudine = latitudine_des AND longitudine = longitudine_des INTO tipo;
+	FROM destinatario
+	WHERE new.latitudine_des = latitudine AND new.longitudine_des  = longitudine INTO nazione_des;
 
-	SET new.tipo_spedizione = tipo;
+	IF (nazione_des = "italia") THEN
+		SET new.tipo_spedizione = "nazionale";
+	ELSE 
+		SET new.tipo_spedizione = "internazionale";
+	END IF;
 END //
 
 DELIMITER ;
+
+
+
+DELIMITER //
+
+CREATE TRIGGER gestione_pacco_co
+AFTER INSERT ON giacenza_pacchi_co FOR EACH ROW
+BEGIN
+	DECLARE done INT DEFAULT FALSE;
+	DECLARE cod_v INT;
+	DECLARE spaz_disp FLOAT;
+	-- cursore che scorre tutti i furgoni appartenenti ad un centro operativo
+	DECLARE cursore1 CURSOR FOR SELECT v.codice_v FROM possiede AS p JOIN veicolo as v ON p.codice_v = v.codice_v
+							    WHERE codice_co = new.codice_co and tipo_veicolo = "furgone";
+	DECLARE CONTINUE HANDLER FOR NOT FOUND SET done = TRUE;
+	-- verifica se il centro operativo è il primo ad occuparsi del pacco, in questo caso deve quindi occuparsi 
+	-- anche del ritiro
+	IF ((SELECT ordine_spedizione FROM affidata_a WHERE codice_co = new.codice_co AND codice_sp = new.codice_sp) = 1) THEN
+		-- verifica se esiste un veicolo appartenente al centro operativo con abbastanza spazio disponibile per il pacco
+		open cursore1;
+		read_loop2: loop
+			fetch cursore1 INTO cod_v;
+			(SELECT spazio_disponibile FROM spazio_disponibile_veicolo WHERE codice_veicolo = cod_v) INTO spaz_disp;
+			IF (spaz_disp > (SELECT lunghezza*larghezza*profondità FROM pacco WHERE codice_sp = new.codice_sp)) THEN
+				-- se esiste un veicolo con spazio disponibile inserisce il seguente assegnamento
+				INSERT INTO assegnamento VALUES (cod_v, new.codice_sp);
+				LEAVE read_loop2;
+			ELSEIF done THEN
+				LEAVE read_loop2;
+			END IF;
+		END loop;
+		-- se non esiste il veicolo aggiorna la fase del pacco in "attesa di recupero"
+		INSERT INTO fase VALUES (CURRENT_TIMESTAMP, new.codice_sp, "attesa di recupero");
+	END IF;
+
+END //
+
+DELIMITER ;
+
+
 
 
 
@@ -417,24 +542,8 @@ DELIMITER ;
 /*funzione che passati in input latitudine e longitudine di 2 posti
 restituisce la distanza tra i 2 punti*/
 
-DELIMITER //
 
-CREATE FUNCTION distanza(lat1 FLOAT, long1 FLOAT, lat2 FLOAT, long2 FLOAT)
-returns FLOAT
-DETERMINISTIC
-BEGIN
-	DECLARE r INT;
-	DECLARE dist FLOAT;
-	SET lat1 = RADIANS(lat1);
-	SET long1 = RADIANS(long1);
-	SET lat2 = RADIANS(lat2);
-	SET long2 = RADIANS(long2);
-	SET r = 6371;
-	SET dist = 2*r* asin( sqrt( POWER(sin((lat2-lat1)/2),2) + cos(lat1) *cos(lat2) *POWER(sin((long2-long1)/2),2) ) );
-	return dist;
-END //
 
-DELIMITER ;
 
 
 	
@@ -442,6 +551,13 @@ DELIMITER ;
 
 
 -- views
+
+CREATE VIEW spazio_disponibile_veicolo (codice_veicolo, spazio_disponibile) AS
+SELECT veicolo.codice_v, valore_volumetrico-COALESCE(sum(lunghezza*larghezza*profondità),0)
+FROM veicolo LEFT join assegnamento on veicolo.codice_v = assegnamento.codice_v
+	LEFT join pacco on assegnamento.codice_sp = pacco.codice_sp
+GROUP BY veicolo.codice_v;
+
 
 CREATE VIEW costo_spedizione (codice_spedizione, stima_costo, costo_effettivo) AS 
 SELECT pacco.codice_sp, max(prezzo_base*peso), max(costo_effettivo)
@@ -542,26 +658,88 @@ values (43,13);
 insert into coordinate_cliente
 values ("abcguri294ktuehv", 43, 13, TRUE);
 
-insert into destinatario
-values (45, 15, "ciao", "ciao", "italia");
-
 insert into veicolo
-values (1, "aa111bb", 1000, "autoarticolato", 34, 41);
+values (1, "aa111aa", 1000, "furgone", 41, 41),
+(2, "aa222aa", 10000, "autoarticolato", 89, 23),
+(3, "aa333aa", 1000, "furgone", 89, 23),
+(4, "aa444aa", 10000, "autoarticolato", 89, 23),
+(5, "aa555aa", 1000, "furgone", 89, 23),
+(6, "aa666aa", 10000, "autoarticolato", 89, 23),
+(7, "aa777aa", 1000, "furgone", 89, 23),
+(8, "aa888aa", 10000, "autoarticolato", 89, 23),
+(9, "aa999aa", 1000, "furgone", 89, 23),
+(10, "aa000bb", 10000, "autoarticolato", 89, 23),
+(11, "aa111bb", 1000, "furgone", 89, 23),
+(12, "aa222bb", 10000, "autoarticolato", 89, 23),
+(13, "aa333bb", 1000, "furgone", 89, 23),
+(14, "aa444bb", 10000, "autoarticolato", 89, 23),
+(15, "aa555bb", 1000, "furgone", 89, 23),
+(16, "aa666bb", 10000, "autoarticolato", 89, 23),
+(17, "aa777bb", 1000, "furgone", 89, 23),
+(18, "aa888bb", 10000, "autoarticolato", 89, 23),
+(19, "aa999bb", 1000, "furgone", 89, 23),
+(20, "aa000cc", 10000, "autoarticolato", 89, 23),
+(21, "aa111cc", 1000, "furgone", 89, 23),
+(22, "aa222cc", 10000, "autoarticolato", 89, 23);
 
-insert into veicolo
-values (2, "cc333qq", 1000, "autoarticolato", 89, 23);
+
+insert into possiede
+values (1,1),
+(1,2),
+(2,3),
+(2,4),
+(3,5),
+(3,6),
+(4,7),
+(4,8),
+(5,9),
+(5,10),
+(6,11),
+(6,12),
+(7,13),
+(7,14),
+(8,15),
+(8,16),
+(9,17),
+(9,18),
+(10,19),
+(10,20),
+(11,21),
+(11,22);
+
+
+
 
 INSERT INTO centro_operativo
 VALUES (1, "via di panico 7", "roma", 00186, "roma", 069812846, 41.899992, 12.467946, "russo", "centroroma@gmail.com", "centro prossimità"),
 (2, "via paolo orsi 15", "roma", 00178, "roma", 067323182, 41.821876, 12.584744, "verdi", "centroroma2@gmail.com", "centro prossimità"),
 (3, "via camilla ravera 5", "roma", 00135, "roma", 068473192, 41.958950, 12.395798, "rossi", "centroroma3@gmail.com", "centro prossimità"),
 (4, "via edimburgo 83", "roma", 00144, "roma", 06783256, 41.819247, 12.453754, "bianchi", "centroroma4@gmail.com", "centro smistamento nazionale"),
-(5, "via dei serragli 32", "firenze", 50125, "firenze", 05432654, 43.767032, 11.245384, "ricci", "centrofirenze@gmail.com", "centro prossimità"),
-(6, "via amati 7", "pistoia", 51100, "pistoia", 05636734,43.931099, 10.918457, "gatti", "centropistoia@gmail.com", "centro prossimità"),
-(7, "via del pino 15", "firenze", 50137, "firenze", 05358796, 43.779575, 11.295022, "testa", "centrofirenze2@gmail.com", "centro smistamento nazionale");
+(5, "via pal grande 10", "fiumicino", 00054, "roma", 06532324, 41.771333, 12.264104, "romano", "centrofiumicino@gmail.com", "centro smistamento internazionale"),
+(6, "via dei serragli 32", "firenze", 50125, "firenze", 05432654, 43.767032, 11.245384, "ricci", "centrofirenze@gmail.com", "centro prossimità"),
+(7, "via amati 7", "pistoia", 51100, "pistoia", 05636734, 43.931099, 10.918457, "gatti", "centropistoia@gmail.com", "centro prossimità"),
+(8, "via del pino 15", "firenze", 50137, "firenze", 05358796, 43.779575, 11.295022, "testa", "centrofirenze2@gmail.com", "centro smistamento nazionale"),
+(9, "rue de rungis 14", "parigi", 75013, "parigi", 57389354, 48.821856, 2.344542, "fontana", "centroparigi@gmail.com", "centro prossimità"),
+(10, "passage panel 8", "parigi", 75018, "parigi", 324235112, 48.896086, 2.342369, "ferrari", "centroparigi2@gmail.com", "centro smistamento nazionale"),
+(11, "rue delagarde 41", "montfermeil", 93370, "parigi", 32434234, 48.902070, 2.568547, "costa", "centromontfermeil@gmail.com", "centro smistamento internazionale");
 
-insert into spedizione 
-values (1, "nazionale", "abcguri294ktuehv", 45, 15);
+
+SET autocommit = OFF;
+
+START TRANSACTION;
+insert into destinatario
+values (43, 13, "ciao", "ciao", "francia");
+
+insert into spedizione (codice_spedizione, cf_cliente, latitudine_des, longitudine_des)
+values (1, "abcguri294ktuehv", 43, 13);
+
+insert into pacco(codice_sp, peso, lunghezza, larghezza, profondità)
+values (1, 23, 10, 5, 5);
+
+COMMIT;
+
+set autocommit = ON;
+
 
 -- insert into pacco
 -- values (1, 23, 10, 10, 5, NULL);
